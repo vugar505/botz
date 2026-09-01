@@ -23,6 +23,7 @@ def run_web_server():
 TOKEN = "8674181843:AAHm_9w4I4ERcrl_8_rWDEEETet_-J2uqmk"
 ADMIN_ID = 8525508135
 
+# Supabase URL və Key
 SUPABASE_URL = "https://dmtjsunpgknljkuopti.supabase.co"
 SUPABASE_KEY = "sb_publishable_4q0aoNK3helEzcBxtn70mg_-WfZNRdk"
 
@@ -144,7 +145,7 @@ async def handle_group_messages(message: Message):
             count = res.data[0]["daily_count"]
             name = f"@{username}" if username != "Yoxdur" else first_name
             
-            if count == 5:
+            if count == 50:
                 await message.reply(f"🤩 🇦🇿 Təbriklər {name} qrupa 50 mesaj göndərmişdir 🙌")
             elif count == 100:
                 await message.reply(f"👑 Təbriklər {name} bu gün qrupa 100 mesaj göndərmişdir. /gunluk /ayliq")
