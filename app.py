@@ -2,17 +2,31 @@ import os
 import asyncio
 import logging
 from datetime import datetime
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from supabase import create_client, Client
 
+# Render üçün mini veb server (port tələbini qarşılamaq üçün)
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    server.serve_forever()
+
 # Konfiqurasiya
 TOKEN = "8674181843:AAHm_9w4I4ERcrl_8_rWDEEETet_-J2uqmk"
 ADMIN_ID = 8525508135
 
-SUPABASE_URL = "https://dmtjsunpgknjljkuopti.supabase.co"
-SUPABASE_KEY = "sb_publishable_4q0aoNK3helEzcBxtn70mg_-WfzNRdk"
+SUPABASE_URL = "https://dmtjsunpgknljkuopti.supabase.co"
+SUPABASE_KEY = "sb_publishable_4q0aoNK3helEzcBxtn70mg_-WfZNRdk"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -31,8 +45,6 @@ def register_chat(chat_id: int, title: str):
 
 def update_message_count(chat_id: int, user_id: int, username: str, first_name: str):
     today = str(datetime.now().date())
-    
-    # İstifadəçi mövcuddurmu yoxla
     res = supabase.table("user_messages").select("*").eq("chat_id", chat_id).eq("user_id", user_id).execute()
     
     if not res.data:
@@ -48,7 +60,6 @@ def update_message_count(chat_id: int, user_id: int, username: str, first_name: 
         }).execute()
     else:
         user = res.data[0]
-        # Gün dəyişibsə gündəlik sayğacı sıfırla
         daily = 1 if user.get("last_message_date") == today else user.get("daily_count", 0) + 1
         
         supabase.table("user_messages").update({
@@ -68,15 +79,6 @@ async def cmd_start(message: Message):
         [InlineKeyboardButton(text="Məni qrupa əlavə et ➕", url=f"https://t.me/{(await bot.me()).username}?startgroup=true")]
     ])
     
-    text = (
-        "Salam əziz dostum, mən AzGoldMedianın telegram söhbət qrupları üçün yaratdığı "
-        "mesaj sayğacı botuyam, mən qruplarda istifadəçilərin yazdığı mesajları hesablayıb "
-        "onları müəyyən mesajlarda təbrik edirəm. Top listə salıram qrupunuzu önə çəkirəm.\><br><br>"
-        "/top - Ümumi qruplar arasında olan liderlik (Aylıq)\n"
-        "/gunluk - Sadəcə qrupda olan istifadəçilərin gün ərzində atdığı mesajlar liderlik\n"
-        "/ayliq - Sadəcə qrupda olan istifadəçilərin aylıq atdığı mesajlar üzrə liderlik"
-    )
-    # HTML teqləri olmadan sadə mətn:
     plain_text = (
         "Salam əziz dostum, mən AzGoldMedianın telegram söhbət qrupları üçün yaratdığı "
         "mesaj sayğacı botuyam, mən qruplarda istifadəçilərin yazdığı mesajları hesablayıb "
@@ -137,7 +139,6 @@ async def handle_group_messages(message: Message):
     register_chat(chat_id, message.chat.title)
     update_message_count(chat_id, user_id, username, first_name)
     
-    # İstifadəçinin günlük mesaj sayını yoxlayaq
     res = supabase.table("user_messages").select("daily_count").eq("chat_id", chat_id).eq("user_id", user_id).execute()
     if res.data:
         count = res.data[0]["daily_count"]
@@ -192,7 +193,6 @@ async def cmd_ayliq(message: Message):
 
 @dp.message(Command("top"))
 async def cmd_top(message: Message):
-    # Ümumi qrupların aylıq mesaj cəminə görə sıralanması
     chats = supabase.table("chats").select("chat_id, title").execute()
     chat_totals = []
     
@@ -207,7 +207,6 @@ async def cmd_top(message: Message):
     for i, item in enumerate(chat_totals[:10], 1):
         text += f"{i} - ci yer {item['title']} - {item['total']} mesaj\n"
         
-    # Əgər qrup daxilində yazılıbsa və siyahı uzundursa yerini göstərək
     if message.chat.type in {"group", "supergroup"}:
         user_chat_id = message.chat.id
         rank = next((i for i, item in enumerate(chat_totals, 1) if item["chat_id"] == user_chat_id), None)
@@ -216,9 +215,13 @@ async def cmd_top(message: Message):
             
     await message.answer(text)
 
-# ----------------- BOTU BAŞLATMAQ -----------------
+# ----------------- MAIN -----------------
 
 async def main():
+    # Mini veb serveri ayrı bir pəncərədə (thread) işə salırıq ki, Render port tələbi ödənsin
+    server_thread = Thread(target=run_web_server, daemon=True)
+    server_thread.start()
+    
     try:
         await bot.send_message(ADMIN_ID, "🚀 Bot uğurla serverə qoşuldu və fəaliyyətə başladı!")
     except Exception as e:
