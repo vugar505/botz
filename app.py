@@ -7,8 +7,10 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from supabase import create_client, Client
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
+# Render üçün mini veb server
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -23,11 +25,11 @@ def run_web_server():
 TOKEN = "8674181843:AAHm_9w4I4ERcrl_8_rWDEEETet_-J2uqmk"
 ADMIN_ID = 8525508135
 
-# Supabase URL və Key
-SUPABASE_URL = "https://dmtjsunpgknljkuopti.supabase.co"
-SUPABASE_KEY = "sb_publishable_4q0aoNK3helEzcBxtn70mg_-WfZNRdk"
+# Birbaşa PostgreSQL bağlantı linki
+DATABASE_URL = "postgresql://postgres:vugartalis0@db.dmtjsunpgknjljkuopti.supabase.co:5432/postgres"
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -36,38 +38,53 @@ logging.basicConfig(level=logging.INFO)
 
 def register_chat(chat_id: int, title: str):
     try:
-        supabase.table("chats").upsert({"chat_id": chat_id, "title": title}).execute()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO chats (chat_id, title) VALUES (%s, %s)
+            ON CONFLICT (chat_id) DO UPDATE SET title = EXCLUDED.title;
+            """,
+            (chat_id, title)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
     except Exception as e:
         logging.error(f"Chat qeydiyyatı xətası: {e}")
 
 def update_message_count(chat_id: int, user_id: int, username: str, first_name: str):
     today = str(datetime.now().date())
     try:
-        res = supabase.table("user_messages").select("*").eq("chat_id", chat_id).eq("user_id", user_id).execute()
+        conn = get_db_connection()
+        cur = conn.cursor()
         
-        if not res.data:
-            supabase.table("user_messages").insert({
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "username": username,
-                "first_name": first_name,
-                "daily_count": 1,
-                "monthly_count": 1,
-                "total_count": 1,
-                "last_message_date": today
-            }).execute()
+        cur.execute("SELECT * FROM user_messages WHERE chat_id = %s AND user_id = %s;", (chat_id, user_id))
+        user = cur.fetchone()
+        
+        if not user:
+            cur.execute(
+                """
+                INSERT INTO user_messages (chat_id, user_id, username, first_name, daily_count, monthly_count, total_count, last_message_date)
+                VALUES (%s, %s, %s, %s, 1, 1, 1, %s);
+                """,
+                (chat_id, user_id, username, first_name, today)
+            )
         else:
-            user = res.data[0]
-            daily = 1 if user.get("last_message_date") == today else user.get("daily_count", 0) + 1
+            daily = 1 if user["last_message_date"] == str(today) else user["daily_count"] + 1
+            cur.execute(
+                """
+                UPDATE user_messages 
+                SET daily_count = %s, monthly_count = monthly_count + 1, total_count = total_count + 1, 
+                    last_message_date = %s, username = %s, first_name = %s
+                WHERE chat_id = %s AND user_id = %s;
+                """,
+                (daily, today, username, first_name, chat_id, user_id)
+            )
             
-            supabase.table("user_messages").update({
-                "daily_count": daily,
-                "monthly_count": user.get("monthly_count", 0) + 1,
-                "total_count": user.get("total_count", 0) + 1,
-                "last_message_date": today,
-                "username": username,
-                "first_name": first_name
-            }).eq("chat_id", chat_id).eq("user_id", user_id).execute()
+        conn.commit()
+        cur.close()
+        conn.close()
     except Exception as e:
         logging.error(f"Mesaj yenilənmə xətası: {e}")
 
@@ -99,13 +116,18 @@ async def cmd_reklam(message: Message):
     
     reklam_text = args[1]
     try:
-        chats = supabase.table("chats").select("chat_id").execute()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT chat_id FROM chats;")
+        chats = cur.fetchall()
+        cur.close()
+        conn.close()
     except Exception as e:
         await message.answer(f"Bazaya qoşulma xətası: {e}")
         return
     
     success, failed = 0, 0
-    for chat in chats.data:
+    for chat in chats:
         try:
             await bot.send_message(chat["chat_id"], reklam_text)
             success += 1
@@ -120,9 +142,13 @@ async def cmd_chats(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
     try:
-        chats = supabase.table("chats").select("chat_id").execute()
-        count = len(chats.data)
-        await message.answer(f"Bot hazırda {count} fərqli qrupda xidmət göstərir.")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT chat_id FROM chats;")
+        chats = cur.fetchall()
+        cur.close()
+        conn.close()
+        await message.answer(f"Bot hazırda {len(chats)} fərqli qrupda xidmət göstərir.")
     except Exception as e:
         await message.answer(f"Xəta baş verdi: {e}")
 
@@ -140,9 +166,15 @@ async def handle_group_messages(message: Message):
     update_message_count(chat_id, user_id, username, first_name)
     
     try:
-        res = supabase.table("user_messages").select("daily_count").eq("chat_id", chat_id).eq("user_id", user_id).execute()
-        if res.data:
-            count = res.data[0]["daily_count"]
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT daily_count FROM user_messages WHERE chat_id = %s AND user_id = %s;", (chat_id, user_id))
+        res = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        if res:
+            count = res["daily_count"]
             name = f"@{username}" if username != "Yoxdur" else first_name
             
             if count == 50:
@@ -164,14 +196,19 @@ async def handle_group_messages(message: Message):
 async def cmd_gunluk(message: Message):
     chat_id = message.chat.id
     try:
-        res = supabase.table("user_messages").select("first_name, username, daily_count").eq("chat_id", chat_id).order("daily_count", desc=True).limit(50).execute()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT first_name, username, daily_count FROM user_messages WHERE chat_id = %s ORDER BY daily_count DESC LIMIT 50;", (chat_id,))
+        res = cur.fetchall()
+        cur.close()
+        conn.close()
         
-        if not res.data:
+        if not res:
             await message.answer("Hələki bu gün üçün məlumat yoxdur.")
             return
         
         text = "🚀 Günlük qrup üzrə ən aktiv ən çox mesaj göndərən istifadəçilər:\n\n"
-        for i, user in enumerate(res.data, 1):
+        for i, user in enumerate(res, 1):
             name = f"@{user['username']}" if user['username'] != "Yoxdur" else user['first_name']
             text += f"{i}. {name} - {user['daily_count']} mesaj\n"
             
@@ -183,14 +220,19 @@ async def cmd_gunluk(message: Message):
 async def cmd_ayliq(message: Message):
     chat_id = message.chat.id
     try:
-        res = supabase.table("user_messages").select("first_name, username, monthly_count").eq("chat_id", chat_id).order("monthly_count", desc=True).limit(10).execute()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT first_name, username, monthly_count FROM user_messages WHERE chat_id = %s ORDER BY monthly_count DESC LIMIT 10;", (chat_id,))
+        res = cur.fetchall()
+        cur.close()
+        conn.close()
         
-        if not res.data:
+        if not res:
             await message.answer("Hələki bu ay üçün məlumat yoxdur.")
             return
         
         text = "👑 Aylıq user aktivliyi siyahısı:\n\n"
-        for i, user in enumerate(res.data, 1):
+        for i, user in enumerate(res, 1):
             name = f"@{user['username']}" if user['username'] != "Yoxdur" else user['first_name']
             text += f"{i} - ci yer {name} - {user['monthly_count']} mesaj\n"
             
@@ -201,14 +243,21 @@ async def cmd_ayliq(message: Message):
 @dp.message(Command("top"))
 async def cmd_top(message: Message):
     try:
-        chats = supabase.table("chats").select("chat_id, title").execute()
-        chat_totals = []
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT chat_id, title FROM chats;")
+        chats = cur.fetchall()
         
-        for chat in chats.data:
-            res = supabase.table("user_messages").select("monthly_count").eq("chat_id", chat["chat_id"]).execute()
-            total = sum([row["monthly_count"] for row in res.data])
+        chat_totals = []
+        for chat in chats:
+            cur.execute("SELECT SUM(monthly_count) as total FROM user_messages WHERE chat_id = %s;", (chat["chat_id"],))
+            row = cur.fetchone()
+            total = row["total"] if row and row["total"] else 0
             chat_totals.append({"title": chat["title"], "total": total, "chat_id": chat["chat_id"]})
             
+        cur.close()
+        conn.close()
+        
         chat_totals.sort(key=lambda x: x["total"], reverse=True)
         
         text = "🏆 Ümumi qruplar arasında liderlik (Aylıq):\n\n"
