@@ -7,10 +7,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import requests
 
-# Render üçün mini veb server
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -25,11 +23,15 @@ def run_web_server():
 TOKEN = "8674181843:AAHm_9w4I4ERcrl_8_rWDEEETet_-J2uqmk"
 ADMIN_ID = 8525508135
 
-# Birbaşa PostgreSQL bağlantı linki
-DATABASE_URL = "postgresql://postgres:vugartalis0@db.dmtjsunpgknjljkuopti.supabase.co:5432/postgres"
+SUPABASE_URL = "https://dmtjsunpgknljkuopti.supabase.co"
+SUPABASE_KEY = "sb_publishable_4q0aoNK3helEzcBxtn70mg_-WfZNRdk"
 
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation"
+}
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -38,53 +40,42 @@ logging.basicConfig(level=logging.INFO)
 
 def register_chat(chat_id: int, title: str):
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO chats (chat_id, title) VALUES (%s, %s)
-            ON CONFLICT (chat_id) DO UPDATE SET title = EXCLUDED.title;
-            """,
-            (chat_id, title)
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
+        url = f"{SUPABASE_URL}/rest/v1/chats"
+        data = {"chat_id": chat_id, "title": title}
+        requests.post(url, headers={**HEADERS, "Prefer": "resolution=merge-duplicates"}, json=data, timeout=5)
     except Exception as e:
         logging.error(f"Chat qeydiyyatı xətası: {e}")
 
 def update_message_count(chat_id: int, user_id: int, username: str, first_name: str):
     today = str(datetime.now().date())
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+        url = f"{SUPABASE_URL}/rest/v1/user_messages?chat_id=eq.{chat_id}&user_id=eq.{user_id}"
+        res = requests.get(url, headers=HEADERS, timeout=5).json()
         
-        cur.execute("SELECT * FROM user_messages WHERE chat_id = %s AND user_id = %s;", (chat_id, user_id))
-        user = cur.fetchone()
-        
-        if not user:
-            cur.execute(
-                """
-                INSERT INTO user_messages (chat_id, user_id, username, first_name, daily_count, monthly_count, total_count, last_message_date)
-                VALUES (%s, %s, %s, %s, 1, 1, 1, %s);
-                """,
-                (chat_id, user_id, username, first_name, today)
-            )
+        if not res:
+            insert_data = {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "username": username,
+                "first_name": first_name,
+                "daily_count": 1,
+                "monthly_count": 1,
+                "total_count": 1,
+                "last_message_date": today
+            }
+            requests.post(f"{SUPABASE_URL}/rest/v1/user_messages", headers=HEADERS, json=insert_data, timeout=5)
         else:
-            daily = 1 if user["last_message_date"] == str(today) else user["daily_count"] + 1
-            cur.execute(
-                """
-                UPDATE user_messages 
-                SET daily_count = %s, monthly_count = monthly_count + 1, total_count = total_count + 1, 
-                    last_message_date = %s, username = %s, first_name = %s
-                WHERE chat_id = %s AND user_id = %s;
-                """,
-                (daily, today, username, first_name, chat_id, user_id)
-            )
-            
-        conn.commit()
-        cur.close()
-        conn.close()
+            user = res[0]
+            daily = 1 if user.get("last_message_date") == today else user.get("daily_count", 0) + 1
+            update_data = {
+                "daily_count": daily,
+                "monthly_count": user.get("monthly_count", 0) + 1,
+                "total_count": user.get("total_count", 0) + 1,
+                "last_message_date": today,
+                "username": username,
+                "first_name": first_name
+            }
+            requests.patch(url, headers=HEADERS, json=update_data, timeout=5)
     except Exception as e:
         logging.error(f"Mesaj yenilənmə xətası: {e}")
 
@@ -93,7 +84,6 @@ async def cmd_start(message: Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Məni qrupa əlavə et ➕", url=f"https://t.me/{(await bot.me()).username}?startgroup=true")]
     ])
-    
     plain_text = (
         "Salam əziz dostum, mən AzGoldMedianın telegram söhbət qrupları üçün yaratdığı "
         "mesaj sayğacı botuyam, mən qruplarda istifadəçilərin yazdığı mesajları hesablayıb "
@@ -108,20 +98,13 @@ async def cmd_start(message: Message):
 async def cmd_reklam(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
-    
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer("Zəhmət olmasa reklam mətnini daxil edin: /reklam [mətn]")
         return
-    
     reklam_text = args[1]
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT chat_id FROM chats;")
-        chats = cur.fetchall()
-        cur.close()
-        conn.close()
+        chats = requests.get(f"{SUPABASE_URL}/rest/v1/chats?select=chat_id", headers=HEADERS, timeout=5).json()
     except Exception as e:
         await message.answer(f"Bazaya qoşulma xətası: {e}")
         return
@@ -134,7 +117,6 @@ async def cmd_reklam(message: Message):
             await asyncio.sleep(0.2)
         except Exception:
             failed += 1
-            
     await message.answer(f"Reklam göndərildi!\nUğurlu: {success}\nUğursuz: {failed}")
 
 @dp.message(Command("chats"), F.chat.type == "private")
@@ -142,12 +124,7 @@ async def cmd_chats(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT chat_id FROM chats;")
-        chats = cur.fetchall()
-        cur.close()
-        conn.close()
+        chats = requests.get(f"{SUPABASE_URL}/rest/v1/chats?select=chat_id", headers=HEADERS, timeout=5).json()
         await message.answer(f"Bot hazırda {len(chats)} fərqli qrupda xidmət göstərir.")
     except Exception as e:
         await message.answer(f"Xəta baş verdi: {e}")
@@ -156,7 +133,6 @@ async def cmd_chats(message: Message):
 async def handle_group_messages(message: Message):
     if not message.from_user or message.from_user.is_bot:
         return
-    
     chat_id = message.chat.id
     user_id = message.from_user.id
     username = message.from_user.username or "Yoxdur"
@@ -166,18 +142,12 @@ async def handle_group_messages(message: Message):
     update_message_count(chat_id, user_id, username, first_name)
     
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT daily_count FROM user_messages WHERE chat_id = %s AND user_id = %s;", (chat_id, user_id))
-        res = cur.fetchone()
-        cur.close()
-        conn.close()
-        
+        url = f"{SUPABASE_URL}/rest/v1/user_messages?select=daily_count&chat_id=eq.{chat_id}&user_id=eq.{user_id}"
+        res = requests.get(url, headers=HEADERS, timeout=5).json()
         if res:
-            count = res["daily_count"]
+            count = res[0]["daily_count"]
             name = f"@{username}" if username != "Yoxdur" else first_name
-            
-            if count == 50:
+            if count == 5:
                 await message.reply(f"🤩 🇦🇿 Təbriklər {name} qrupa 50 mesaj göndərmişdir 🙌")
             elif count == 100:
                 await message.reply(f"👑 Təbriklər {name} bu gün qrupa 100 mesaj göndərmişdir. /gunluk /ayliq")
@@ -196,22 +166,15 @@ async def handle_group_messages(message: Message):
 async def cmd_gunluk(message: Message):
     chat_id = message.chat.id
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT first_name, username, daily_count FROM user_messages WHERE chat_id = %s ORDER BY daily_count DESC LIMIT 50;", (chat_id,))
-        res = cur.fetchall()
-        cur.close()
-        conn.close()
-        
+        url = f"{SUPABASE_URL}/rest/v1/user_messages?select=first_name,username,daily_count&chat_id=eq.{chat_id}&order=daily_count.desc&limit=50"
+        res = requests.get(url, headers=HEADERS, timeout=5).json()
         if not res:
             await message.answer("Hələki bu gün üçün məlumat yoxdur.")
             return
-        
         text = "🚀 Günlük qrup üzrə ən aktiv ən çox mesaj göndərən istifadəçilər:\n\n"
         for i, user in enumerate(res, 1):
             name = f"@{user['username']}" if user['username'] != "Yoxdur" else user['first_name']
             text += f"{i}. {name} - {user['daily_count']} mesaj\n"
-            
         await message.answer(text)
     except Exception as e:
         await message.answer("Məlumatlar alınarkən xəta baş verdi.")
@@ -220,22 +183,15 @@ async def cmd_gunluk(message: Message):
 async def cmd_ayliq(message: Message):
     chat_id = message.chat.id
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT first_name, username, monthly_count FROM user_messages WHERE chat_id = %s ORDER BY monthly_count DESC LIMIT 10;", (chat_id,))
-        res = cur.fetchall()
-        cur.close()
-        conn.close()
-        
+        url = f"{SUPABASE_URL}/rest/v1/user_messages?select=first_name,username,monthly_count&chat_id=eq.{chat_id}&order=monthly_count.desc&limit=10"
+        res = requests.get(url, headers=HEADERS, timeout=5).json()
         if not res:
             await message.answer("Hələki bu ay üçün məlumat yoxdur.")
             return
-        
         text = "👑 Aylıq user aktivliyi siyahısı:\n\n"
         for i, user in enumerate(res, 1):
             name = f"@{user['username']}" if user['username'] != "Yoxdur" else user['first_name']
             text += f"{i} - ci yer {name} - {user['monthly_count']} mesaj\n"
-            
         await message.answer(text)
     except Exception as e:
         await message.answer("Məlumatlar alınarkən xəta baş verdi.")
@@ -243,33 +199,24 @@ async def cmd_ayliq(message: Message):
 @dp.message(Command("top"))
 async def cmd_top(message: Message):
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT chat_id, title FROM chats;")
-        chats = cur.fetchall()
-        
+        chats = requests.get(f"{SUPABASE_URL}/rest/v1/chats?select=chat_id,title", headers=HEADERS, timeout=5).json()
         chat_totals = []
         for chat in chats:
-            cur.execute("SELECT SUM(monthly_count) as total FROM user_messages WHERE chat_id = %s;", (chat["chat_id"],))
-            row = cur.fetchone()
-            total = row["total"] if row and row["total"] else 0
+            url = f"{SUPABASE_URL}/rest/v1/user_messages?select=monthly_count&chat_id=eq.{chat['chat_id']}"
+            res = requests.get(url, headers=HEADERS, timeout=5).json()
+            total = sum([row["monthly_count"] for row in res]) if res else 0
             chat_totals.append({"title": chat["title"], "total": total, "chat_id": chat["chat_id"]})
-            
-        cur.close()
-        conn.close()
         
         chat_totals.sort(key=lambda x: x["total"], reverse=True)
-        
         text = "🏆 Ümumi qruplar arasında liderlik (Aylıq):\n\n"
         for i, item in enumerate(chat_totals[:10], 1):
             text += f"{i} - ci yer {item['title']} - {item['total']} mesaj\n"
-            
+        
         if message.chat.type in {"group", "supergroup"}:
             user_chat_id = message.chat.id
             rank = next((i for i, item in enumerate(chat_totals, 1) if item["chat_id"] == user_chat_id), None)
             if rank and rank > 10:
                 text += f"\n... Sizin qrup {rank}-ci yerdədir."
-                
         await message.answer(text)
     except Exception as e:
         await message.answer("Liderlik cədvəli yüklənərkən xəta baş verdi.")
@@ -277,12 +224,10 @@ async def cmd_top(message: Message):
 async def main():
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
-    
     try:
         await bot.send_message(ADMIN_ID, "🚀 Bot uğurla serverə qoşuldu və fəaliyyətə başladı!")
     except Exception as e:
         logging.error(f"Adminə xəbərdarlıq göndərilə bilmədi: {e}")
-        
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
